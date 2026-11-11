@@ -1,9 +1,9 @@
 // NAME: Volume Lock
 // DESCRIPTION: Caps Spotify's maximum volume behind a password. Lock button sits next to the volume control; password lives in Settings.
-// VERSION: 1.2.0
+// VERSION: 1.2.1
 
 (function () {
-  const VERSION = "1.2.0";
+  const VERSION = "1.2.1";
   const REPO = "raidevss/Lock-Spotify";
   const UPDATE_KEY = "volume-lock:update"; // { version, code } downloaded by "Check for updates"
 
