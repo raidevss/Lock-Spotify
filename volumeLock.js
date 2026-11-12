@@ -1,9 +1,9 @@
 // NAME: Volume Lock
-// DESCRIPTION: Caps Spotify's maximum volume behind a password. Lock button sits next to the volume control; password lives in Settings.
-// VERSION: 1.3.3
+// DESCRIPTION: Caps Spotify's maximum volume behind a password. Lock button sits next to the volume control.
+// VERSION: 1.4.0
 
 (function () {
-  const VERSION = "1.3.3";
+  const VERSION = "1.4.0";
   const REPO = "raidevss/Lock-Spotify";
   const UPDATE_KEY = "volume-lock:update"; // { version, code } downloaded by "Check for updates"
 
@@ -145,13 +145,69 @@ function volumeLock() {
   const setVol = (v) => api.setVolume(clamp01(capped(v)));
 
   // Layer 3: instant correction for changes that come from outside the app.
+  // Runs on Spotify's own "volume" event, plus a slow backstop. It only ever calls
+  // setVolume when the volume is really above the cap, and at most twice a second,
+  // so it never competes with Spotify while it starts the next song in the background.
+  let lastEnforce = 0;
   function enforce() {
-    if (state.locked && getVol() > state.max + EPS) setVol(state.max);
+    if (!state.locked || getVol() <= state.max + 0.01) return;
+    const now = Date.now();
+    if (now - lastEnforce < 500) return;
+    lastEnforce = now;
+    setVol(state.max);
   }
   try {
     (api.getEvents?.() ?? api._events)?.addListener?.("volume", enforce);
   } catch {}
-  setInterval(enforce, 250); // backstop only
+  setInterval(enforce, 2000);
+
+  // ---------- loudness ----------
+  // Some songs are mastered much louder than others. Spotify's "Normalize volume"
+  // evens that out; keep it on (the installer sets it too, but Spotify can turn it
+  // back off). Checked once at start and then every few minutes, never in a tight loop.
+  const prefs = S.Platform?.PlayerAPI?._prefs;
+  async function keepNormalized() {
+    if (!prefs?.set) return;
+    try {
+      const cur = await prefs.get?.({ key: "audio.normalize_v2" });
+      if (cur?.entries?.["audio.normalize_v2"]?.bool === true || cur?.value?.bool === true) return;
+      await prefs.set({ key: "audio.normalize_v2", value: { bool: true } });
+    } catch (e) {
+      console.warn("[Volume Lock] couldn't turn on Normalize volume", e);
+    }
+  }
+  keepNormalized();
+  setInterval(keepNormalized, 5 * 60_000);
+
+  // ---------- autoplay watchdog ----------
+  // When Spotify isn't the focused window it sometimes finishes a song and then sits
+  // there until it's clicked. If a song played to its end and playback is still stopped
+  // a few seconds later, start the next one. A pause in the middle of a song is never touched.
+  const P = S.Player;
+  let wasNearEnd = false;
+  let endedAt = 0;
+  let endedUri = null;
+  const uri = () => P.data?.item?.uri ?? P.data?.track?.uri ?? null;
+  setInterval(() => {
+    try {
+      const playing = P.isPlaying?.();
+      const dur = P.getDuration?.() || 0;
+      const pos = P.getProgress?.() || 0;
+      if (playing) {
+        wasNearEnd = dur > 0 && dur - pos < 3000;
+        endedAt = 0;
+        endedUri = uri();
+        return;
+      }
+      if (!wasNearEnd) return; // paused by someone, not a song ending
+      if (!endedAt) endedAt = Date.now();
+      if (Date.now() - endedAt < 3000) return;
+      wasNearEnd = false;
+      endedAt = 0;
+      if (uri() && uri() !== endedUri && pos < 3000) P.play?.(); // next song loaded but not started
+      else P.next?.(); // still stuck on the finished song
+    } catch {}
+  }, 1000);
 
   // Layer 4: clamp pointer coordinates on the slider before Spotify reads them.
   // The track is measured once per drag (on press) so moves never force an extra layout.
@@ -328,19 +384,15 @@ function volumeLock() {
   style.id = "volume-lock-style";
   style.textContent = `
 .vl-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
-  width:32px;height:32px;padding:0;margin-right:4px;border:0;border-radius:50%;background:transparent;
-  color:var(--text-subdued,#b3b3b3);cursor:pointer;transition:color .1s,transform .1s}
-.vl-btn:hover{color:var(--text-base,#fff);transform:scale(1.04)}
+  width:32px;height:32px;padding:0;margin:0;border:0;border-radius:50%;background:transparent;
+  color:var(--vl-idle,var(--text-subdued,#b3b3b3));cursor:pointer;transition:color .1s,transform .1s}
+.vl-btn:hover{color:var(--vl-hover,var(--text-base,#fff));transform:scale(1.04)}
 .vl-btn:active{transform:scale(1)}
 .vl-btn:focus-visible{outline:2px solid #fff;outline-offset:-2px}
 .vl-btn svg{width:16px;height:16px;display:block}
-.vl-btn.vl-active{color:var(--text-bright-accent,#1ed760)}
-.vl-btn.vl-active:hover{color:#3be477}
-.vl-btn.vl-active::after{content:"";position:absolute;left:50%;bottom:1px;width:4px;height:4px;
-  border-radius:50%;background:currentColor;transform:translateX(-50%)}
-
-.vl-secret{cursor:default;user-select:none;-webkit-user-select:none}
-.x-settings-row[hidden]{display:none!important}
+.vl-btn.vl-active,.vl-btn.vl-active:hover{color:var(--vl-on,var(--text-bright-accent,#1ed760))}
+.vl-btn.vl-active::after{content:"";position:absolute;left:50%;bottom:var(--vl-dot-bottom,0px);
+  width:var(--vl-dot,4px);height:var(--vl-dot,4px);border-radius:50%;background:currentColor;transform:translateX(-50%)}
 .vl-root{position:fixed;inset:0;z-index:1000}
 .vl-root .main-playlistEditDetailsModal-container{width:400px;max-width:calc(100vw - 32px);min-height:0}
 .vl-form{display:flex;flex-direction:column;gap:12px;margin:0;padding:0 24px 24px}
@@ -354,22 +406,19 @@ function volumeLock() {
 .vl-primary:hover{transform:scale(1.04)}
 .vl-primary:active{transform:scale(1)}
 .vl-primary:disabled{opacity:.6;cursor:default;transform:none}
-.vl-settings{margin:24px 0}
-.vl-settings .x-settings-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:16px}
-.vl-settings .x-settings-firstColumn{display:flex;flex-direction:column;gap:2px;min-width:0}
-.vl-settings .x-settings-firstColumn > span{color:var(--text-subdued,#b3b3b3)}
-.vl-secondary{flex:0 0 auto;min-height:32px;padding:4px 16px;border:1px solid var(--essential-subdued,#7c7c7c);
-  border-radius:9999px;background:transparent;color:var(--text-base,#fff);cursor:pointer;transition:transform .1s}
-.vl-secondary:hover{border-color:var(--text-base,#fff);transform:scale(1.04)}
-.vl-secondary:disabled{opacity:.6;cursor:default;transform:none}
+.vl-links{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin-top:4px}
+.vl-link{padding:0;border:0;background:none;color:var(--spice-subtext,#b3b3b3);cursor:pointer}
+.vl-link:hover{color:var(--spice-text,#fff);text-decoration:underline}
+.vl-link:disabled{opacity:.6;cursor:default;text-decoration:none}
+.vl-version{margin-left:auto;color:var(--spice-subtext,#b3b3b3)}
 `;
   document.head.appendChild(style);
 
   // ---------- icons ----------
-  const ICON_LOCKED = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
-    <path d="M5 7V4.75a3 3 0 0 1 6 0V7"/><rect x="2.75" y="7" width="10.5" height="7.25" rx="1.5" fill="currentColor"/></svg>`;
-  const ICON_UNLOCKED = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
-    <path d="M5 7V4.75a3 3 0 0 1 5.8-1.1"/><rect x="2.75" y="7" width="10.5" height="7.25" rx="1.5"/></svg>`;
+  const ICON_LOCKED = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4.75 7.25V5a3.25 3.25 0 0 1 6.5 0v2.25"/><rect x="2.75" y="7.25" width="10.5" height="7.5" rx="1.5"/><path d="M8 10.25v1.5"/></svg>`;
+  const ICON_UNLOCKED = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4.75 7.25V5a3.25 3.25 0 0 1 6.27-1.2"/><rect x="2.75" y="7.25" width="10.5" height="7.5" rx="1.5"/><path d="M8 10.25v1.5"/></svg>`;
   const ICON_CLOSE = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
     <path d="M2.47 2.47a.75.75 0 0 1 1.06 0L8 6.94l4.47-4.47a.75.75 0 1 1 1.06 1.06L9.06 8l4.47 4.47a.75.75 0 1 1-1.06 1.06L8 9.06l-4.47 4.47a.75.75 0 0 1-1.06-1.06L6.94 8 2.47 3.53a.75.75 0 0 1 0-1.06z"/></svg>`;
 
@@ -432,7 +481,7 @@ function volumeLock() {
   };
 
   // Builds a password form: note line, inputs, inline error, one primary button.
-  function passwordForm({ note, inputs, button, onSubmit }) {
+  function passwordForm({ note, inputs, button, onSubmit, footer }) {
     const err = el("p", { className: "vl-error encore-text-body-small" });
     err.setAttribute("role", "alert");
     const submit = el("button", { type: "submit", className: "vl-primary encore-text-body-medium-bold", textContent: button });
@@ -443,6 +492,7 @@ function volumeLock() {
       ...inputs,
       err,
       el("div", { className: "vl-actions" }, submit),
+      footer ?? null,
     );
     const fail = (msg, input) => {
       err.textContent = msg;
@@ -473,14 +523,30 @@ function volumeLock() {
       button: "Unlock",
       onSubmit: async (fail) => {
         if (lockedOutFor()) return fail(tooManyMsg());
-        if (!(await checkPassword(pw.value))) {
-          recordFailure();
-          return fail(lockedOutFor() ? tooManyMsg() : "Wrong password.", pw);
+        if (await checkPassword(pw.value)) {
+          recordSuccess();
+          closeModal();
+          return unlock();
         }
-        recordSuccess();
-        closeModal();
-        unlock();
+        // The hidden reset code also works here: it removes the password and unlocks.
+        if (await checkMaster(pw.value)) {
+          recordSuccess();
+          state.hash = null;
+          state.salt = null;
+          closeModal();
+          unlock(true);
+          return S.showNotification?.("Password reset. Volume unlocked");
+        }
+        recordFailure();
+        return fail(lockedOutFor() ? tooManyMsg() : "Wrong password.", pw);
       },
+      footer: el(
+        "div",
+        { className: "vl-links" },
+        el("button", { type: "button", className: "vl-link encore-text-body-small", textContent: "Change password", onclick: () => openSetPassword() }),
+        el("button", { type: "button", className: "vl-link encore-text-body-small", textContent: "Check for updates", onclick: checkForUpdates }),
+        el("span", { className: "vl-version encore-text-body-small", textContent: `v${window.__volumeLockStarted || VERSION}` }),
+      ),
     });
     openModal("Unlock volume", form, pw);
   }
@@ -509,37 +575,11 @@ function volumeLock() {
         recordSuccess();
         save();
         closeModal();
-        refreshSettings();
         if (lockAfter) lock();
         else S.showNotification?.("Password saved");
       },
     });
     openModal(hasPw ? "Change password" : "Set password", form, cur ?? next);
-  }
-
-  function openReset() {
-    const cur = pwInput("Current password", "current-password");
-    const form = passwordForm({
-      note: "Removes the password and unlocks the volume.",
-      inputs: [cur],
-      button: "Reset",
-      onSubmit: async (fail) => {
-        if (lockedOutFor()) return fail(tooManyMsg());
-        const ok = (await checkPassword(cur.value)) || (await checkMaster(cur.value));
-        if (!ok) {
-          recordFailure();
-          return fail(lockedOutFor() ? tooManyMsg() : "Wrong password.", cur);
-        }
-        recordSuccess();
-        state.hash = null;
-        state.salt = null;
-        closeModal();
-        unlock(true);
-        refreshSettings();
-        S.showNotification?.("Password reset. Volume unlocked");
-      },
-    });
-    openModal("Reset password", form, cur);
   }
 
   // ---------- updates ----------
@@ -569,144 +609,45 @@ function volumeLock() {
     }
   }
 
-  // ---------- Settings page section ----------
-  // Class names are copied from Spotify's own Settings rows at runtime (they're hashed per version).
-  let settingsSection = null;
-  function settingsClasses(container, heading) {
-    const h2 = container.querySelector(".x-settings-section h2") || heading;
-    const label = container.querySelector(".x-settings-firstColumn label");
-    const marginal = container.querySelector(".x-settings-firstColumn span.encore-text-marginal");
-    const button = [...container.querySelectorAll(".x-settings-secondColumn button")].find((b) => /secondary/.test(b.className));
-    return {
-      h2: h2?.className || "encore-text-body-medium-bold",
-      label: label?.className || "encore-text-body-small",
-      marginal: marginal?.className || "encore-text-marginal",
-      button: (button?.className || "vl-secondary encore-text-body-small-bold").replace(/\s?e-\d+-button--trailing/, ""),
-    };
-  }
-  function settingsRow(cls, labelText, desc, btnText, onClick) {
-    return el(
-      "div",
-      { className: "x-settings-row" },
-      el(
-        "div",
-        { className: "x-settings-firstColumn x-settings-firstColumnFlexCol" },
-        el("label", { className: cls.label, textContent: labelText }),
-        el("span", { className: cls.marginal, textContent: desc }),
-      ),
-      el("div", { className: "x-settings-secondColumn" }, el("button", { type: "button", className: cls.button, textContent: btnText, onclick: onClick })),
-    );
-  }
-  function buildSettings(container, heading) {
-    const cls = settingsClasses(container, heading);
-    const section = el("div", { className: "x-settings-section vl-settings" }, el("h2", { className: cls.h2, textContent: "Volume lock" }));
-    if (state.hash) {
-      const changeRow = settingsRow(cls, "Change password", "The password used to unlock the volume.", "Change", () => openSetPassword());
-      const resetRow = settingsRow(cls, "Reset password", "Removes the password and unlocks the volume.", "Reset", openReset);
-      resetRow.hidden = true;
-      // Hidden shortcuts on the "Change password" label (no cursor or selection hint):
-      //   triple-click        -> reveal "Reset password"
-      //   Shift + triple-click -> toggle the lock (unlock if locked, lock at current volume if not)
-      const label = changeRow.querySelector("label");
-      label.classList.add("vl-secret");
-      label.addEventListener("click", (e) => {
-        if (e.detail !== 3) return;
-        if (!e.shiftKey) resetRow.hidden = false;
-        else if (state.locked) unlock();
-        else lock();
-      });
-      section.append(changeRow, resetRow);
-    } else {
-      section.append(settingsRow(cls, "Password", "Set a password to lock the volume with.", "Set password", () => openSetPassword()));
-    }
-    const running = window.__volumeLockStarted || VERSION;
-    const updatesRow = settingsRow(cls, "Updates", `Version ${running}`, "Check for updates", checkForUpdates);
-    section.append(updatesRow);
-    return section;
-  }
-  // Spotify's Settings markup changes between versions (1.3.x dropped the old
-  // "x-settings" names), so find the page by its text instead: the "Playback"
-  // heading next to other known section headings, on a page with "Normalize volume".
-  const OTHER_SECTIONS = /^(language|library|your library|display|social|startup and window behaviou?r|storage|compatibility|proxy settings|local files|audio quality|account|notifications|privacy)$/i;
-  // Finds the innermost element whose whole text matches (works even when Spotify
-  // splits a label across several elements).
-  function textEl(root, re) {
-    let best = null;
-    for (const n of root.querySelectorAll("h1,h2,h3,h4,h5,label,span,p,div,button")) {
-      if (n.childElementCount > 3 || n.closest(".vl-settings, .vl-root")) continue;
-      if (n.textContent.length > 60 || !re.test(n.textContent.trim())) continue;
-      if (!best || best.contains(n)) best = n;
-    }
-    return best;
-  }
-  function hasOtherSection(node) {
-    for (const n of node.querySelectorAll("h1,h2,h3,h4,h5,span,div,p")) {
-      if (n.childElementCount <= 3 && n.textContent.length <= 40 && OTHER_SECTIONS.test(n.textContent.trim())) return true;
-    }
-    return false;
-  }
-  function findSettings() {
-    // Old Spotify (<= 1.2.x)
-    const old = document.querySelector(".x-settings-container");
-    if (old) {
-      const sections = [...old.children].filter((s) => s !== settingsSection && s.querySelector("h2"));
-      const anchor = sections.find((s) => /^playback$/i.test(s.querySelector("h2")?.textContent.trim() ?? ""));
-      return { container: old, anchor };
-    }
-    // New Spotify: only search while the Settings page (or a settings dialog) is open.
-    const path = S.Platform?.History?.location?.pathname || "";
-    if (!/preferences|settings/i.test(path) && !document.querySelector('[role="dialog"]')) return null;
-    const root = document.body;
-    const normalize = textEl(root, /^normali[sz]e volume$/i);
-    if (!normalize) return null;
-    const heading = textEl(root, /^playback$/i) || normalize;
-    // Climb from the "Playback" heading to its section: the last ancestor that doesn't
-    // also contain another section's heading. Its parent holds all the sections.
-    let section = heading;
-    while (section.parentElement && section.parentElement !== root && !hasOtherSection(section.parentElement)) {
-      section = section.parentElement;
-    }
-    if (!section.parentElement) return null;
-    return { container: section.parentElement, anchor: section, heading };
-  }
-
-  let lastSettingsCheck = 0;
-  let settingsTimer = null;
-  function mountSettings(force) {
-    if (settingsSection?.isConnected) return;
-    const now = Date.now();
-    if (!force && now - lastSettingsCheck < 400) {
-      settingsTimer ??= setTimeout(() => {
-        settingsTimer = null;
-        mountSettings();
-      }, 450);
-      return;
-    }
-    lastSettingsCheck = now;
-    const found = findSettings();
-    if (!found) {
-      settingsSection = null;
-      return;
-    }
-    settingsSection = buildSettings(found.container, found.heading);
-    if (found.anchor) found.anchor.after(settingsSection);
-    else found.container.append(settingsSection);
-  }
-  function refreshSettings() {
-    settingsSection?.remove();
-    settingsSection = null;
-    mountSettings(true);
-  }
-
   // ---------- playbar button ----------
   const btn = el("button", { type: "button", className: "vl-btn" });
   const tip = S.Tippy && S.TippyProps ? S.Tippy(btn, { ...S.TippyProps, content: "" }) : null;
 
-  btn.addEventListener("click", () => {
+  // Hidden shortcut: Ctrl + Shift + triple-click toggles the lock without the password.
+  btn.addEventListener("click", (e) => {
+    if (e.ctrlKey && e.shiftKey) {
+      if (e.detail !== 3) return; // ignore the first two clicks of the triple-click
+      if (state.locked) unlock();
+      else if (!state.hash) openSetPassword({ lockAfter: true });
+      else lock();
+      return;
+    }
     if (state.locked) openUnlock();
     else if (!state.hash) openSetPassword({ lockAfter: true });
     else lock();
   });
+
+  // Match the look of Spotify's neighbouring playbar buttons (lyrics, queue, devices):
+  // same idle/hover color, and the same green and dot when active.
+  function syncLook() {
+    const row = btn.parentElement?.parentElement || btn.parentElement;
+    if (!row) return;
+    const others = [...row.querySelectorAll("button")].filter((b) => b !== btn && !b.closest('[data-testid="volume-bar"], .volume-bar') && b.querySelector("svg"));
+    if (!others.length) return;
+    const isActive = (b) =>
+      b.getAttribute("aria-pressed") === "true" || b.dataset.active === "true" || /active/i.test(b.className);
+    const idle = others.find((b) => !isActive(b));
+    const on = others.find(isActive);
+    if (idle) btn.style.setProperty("--vl-idle", getComputedStyle(idle).color);
+    if (on) {
+      btn.style.setProperty("--vl-on", getComputedStyle(on).color);
+      const dot = getComputedStyle(on, "::after");
+      if (dot.content && dot.content !== "none" && parseFloat(dot.width) > 0) {
+        btn.style.setProperty("--vl-dot", dot.width);
+        if (dot.bottom && dot.bottom !== "auto") btn.style.setProperty("--vl-dot-bottom", dot.bottom);
+      }
+    }
+  }
 
   function render() {
     btn.innerHTML = state.locked ? ICON_LOCKED : ICON_UNLOCKED;
@@ -719,24 +660,28 @@ function volumeLock() {
 
   function mountButton() {
     const vb = findBar();
-    if (vb?.parentElement && btn.nextElementSibling !== vb) vb.parentElement.insertBefore(btn, vb);
+    if (vb?.parentElement && btn.nextElementSibling !== vb) {
+      vb.parentElement.insertBefore(btn, vb);
+      syncLook();
+    }
   }
 
-  // Spotify re-renders the playbar and settings page; keep our nodes attached.
+  // Spotify re-renders the playbar; keep the button attached. Skipped while the
+  // window is hidden, so nothing runs in the background on every song change.
   let queued = false;
   new MutationObserver(() => {
-    if (queued) return;
+    if (queued || document.hidden) return;
     queued = true;
-    requestAnimationFrame(() => {
+    setTimeout(() => {
       queued = false;
       mountButton();
-      mountSettings();
-    });
+    }, 200);
   }).observe(document.body, { childList: true, subtree: true });
+  document.addEventListener("visibilitychange", () => !document.hidden && mountButton());
+  setInterval(() => !document.hidden && syncLook(), 3000); // picks up theme / active-state changes
 
   render();
   mountButton();
-  mountSettings();
   enforce();
 }
 })();
