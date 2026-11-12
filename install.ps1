@@ -93,7 +93,25 @@ function Install-LockSpotify {
     Run-Spicetify -q config extensions volumeLock.js | Out-Null
   }
 
-  # --- 5. Apply ---
+  # --- 5. Even out loudness between songs: turn on Spotify's "Normalize volume" ---
+  # Spotify keeps this in its prefs files and rewrites them on exit, so close it first.
+  # Set LOCK_SPOTIFY_NO_NORMALIZE=1 to skip.
+  if ($env:LOCK_SPOTIFY_NO_NORMALIZE -ne '1') {
+    Step 'Turning on "Normalize volume" (keeps every song at a similar loudness)'
+    Get-Process Spotify -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 2
+    $prefFiles = @($spotifyPrefs) + @(Get-ChildItem (Join-Path $env:APPDATA 'Spotify\Users') -Filter prefs -Recurse -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    foreach ($file in $prefFiles) {
+      if (-not (Test-Path $file)) { continue }
+      $lines = @([IO.File]::ReadAllLines($file) | Where-Object { $_ -notmatch '^audio\.normalize_v2=' })
+      $lines += 'audio.normalize_v2=true'
+      [IO.File]::WriteAllLines($file, [string[]]$lines, $utf8)
+    }
+    Ok 'Normalize volume is on'
+  }
+
+  # --- 6. Apply ---
   Step 'Applying to Spotify (Spotify will restart)'
   $backupDir = Join-Path $userData 'Backup'
   $hasBackup = (Test-Path $backupDir) -and (Get-ChildItem $backupDir -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -106,14 +124,15 @@ function Install-LockSpotify {
   }
   Ok 'Applied'
 
-  # --- 6. Stop Spotify from updating itself (an update would remove the lock) ---
+  # --- 7. Stop Spotify from updating itself (an update would remove the lock) ---
   Step 'Blocking Spotify auto-updates'
   if ($env:LOCK_SPOTIFY_ALLOW_UPDATES -eq '1') { Ok 'Skipped (LOCK_SPOTIFY_ALLOW_UPDATES=1)' }
   elseif ((Run-Spicetify spotify-updates block) -eq 0) { Ok 'Blocked' }
   else { Write-Host '  Could not block updates. If the lock disappears after a Spotify update, run this installer again.' -ForegroundColor Yellow }
 
   Write-Host "`nDone. Volume Lock v$extVersion is installed." -ForegroundColor Green
-  Write-Host 'In Spotify: click the lock next to the volume to lock it. Password settings are in Settings > Volume lock.'
+  Write-Host 'In Spotify: click the lock next to the volume to lock it. Password settings are in Settings > Volume lock,'
+  Write-Host 'or right-click the lock button.'
 }
 
 try {

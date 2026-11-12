@@ -1,9 +1,9 @@
 // NAME: Volume Lock
 // DESCRIPTION: Caps Spotify's maximum volume behind a password. Lock button sits next to the volume control; password lives in Settings.
-// VERSION: 1.2.1
+// VERSION: 1.3.0
 
 (function () {
-  const VERSION = "1.2.1";
+  const VERSION = "1.3.0";
   const REPO = "raidevss/Lock-Spotify";
   const UPDATE_KEY = "volume-lock:update"; // { version, code } downloaded by "Check for updates"
 
@@ -155,13 +155,61 @@ function volumeLock() {
 
   // Layer 4: clamp pointer coordinates on the slider before Spotify reads them.
   // The track is measured once per drag (on press) so moves never force an extra layout.
-  const BAR = '[data-testid="volume-bar"]';
-  const SLIDER = `${BAR} .volume-bar__slider-container`;
-  const TRACK = '[data-testid="progress-bar-background"]';
+  // Spotify renames these between versions, so try several and fall back to geometry.
+  const BAR = '[data-testid="volume-bar"], .volume-bar';
+  const TRACK_SELECTORS = [
+    '[data-testid="progress-bar-background"]',
+    '.x-progressBar-progressBarBg',
+    '[data-testid="progress-bar"]',
+    '.progress-bar',
+  ];
   const forwarded = new WeakSet();
   let dragRect = null;
+  let dragBar = null;
 
   const closest = (e, sel) => (e.target instanceof Element ? e.target.closest(sel) : null);
+  const findBar = () => document.querySelector(BAR);
+
+  function findTrack(bar) {
+    for (const sel of TRACK_SELECTORS) {
+      const t = bar.querySelector(sel);
+      if (t && t.getBoundingClientRect().width) return t;
+    }
+    // Fallback: the longest thin element in the volume bar that isn't a button.
+    let best = null;
+    let bestLen = 0;
+    for (const d of bar.querySelectorAll("div")) {
+      if (d.closest("button")) continue;
+      const r = d.getBoundingClientRect();
+      const len = Math.max(r.width, r.height);
+      if (len > bestLen && Math.min(r.width, r.height) <= 24) {
+        best = d;
+        bestLen = len;
+      }
+    }
+    return best;
+  }
+  // The slider part of the volume bar (not the mute button, not our lock button).
+  function sliderBar(e) {
+    const bar = closest(e, BAR);
+    if (!bar || closest(e, "button") || closest(e, ".vl-btn")) return null;
+    return bar;
+  }
+
+  // If the knob is drawn above the cap but the volume didn't change, Spotify never
+  // re-renders it. Nudge the volume so the slider snaps back to the real level.
+  function snapSlider(bar, onlyIfKnown = false) {
+    if (!state.locked) return;
+    const input = bar?.querySelector('input[type="range"]');
+    if (!input && onlyIfKnown) return;
+    if (input) {
+      const max = Number(input.max) || 1;
+      if (Number(input.value) / max <= state.max + EPS) return;
+    }
+    const target = Math.min(getVol(), state.max);
+    apiSet(Math.max(0, target - 0.01));
+    setTimeout(() => apiSet(target), 60);
+  }
 
   function clampPointer(e, r) {
     if (!r.width || !r.height) return;
@@ -195,9 +243,13 @@ function volumeLock() {
 
   function onDown(e) {
     if (forwarded.has(e) || !state.locked) return;
-    const track = closest(e, SLIDER)?.querySelector(TRACK);
+    const bar = sliderBar(e);
+    const track = bar && findTrack(bar);
     if (!track) return;
-    if (e.type === "pointerdown" || !dragRect) dragRect = track.getBoundingClientRect();
+    if (e.type === "pointerdown" || !dragRect) {
+      dragRect = track.getBoundingClientRect();
+      dragBar = bar;
+    }
     clampPointer(e, dragRect);
   }
   function onMove(e) {
@@ -207,18 +259,31 @@ function volumeLock() {
   function onUp(e) {
     if (forwarded.has(e) || !dragRect) return;
     if (state.locked) clampPointer(e, dragRect);
+    const bar = dragBar;
     dragRect = null;
+    dragBar = null;
+    setTimeout(() => snapSlider(bar), 50);
   }
   for (const t of ["pointerdown", "mousedown"]) window.addEventListener(t, onDown, true);
   for (const t of ["pointermove", "mousemove"]) window.addEventListener(t, onMove, true);
   window.addEventListener("pointerup", onUp, true);
-  window.addEventListener("pointercancel", () => (dragRect = null), true);
+  window.addEventListener("mouseup", onUp, true);
+  window.addEventListener("pointercancel", () => (dragRect = dragBar = null), true);
+  // Mouse wheel over the slider: Spotify can move the knob before the clamp applies.
+  window.addEventListener("wheel", (e) => {
+    const bar = state.locked && closest(e, BAR);
+    if (bar) setTimeout(() => snapSlider(bar), 80);
+  }, true);
+  // Backstop for anything else that leaves the knob above the cap.
+  setInterval(() => {
+    if (state.locked && !dragRect) snapSlider(findBar(), true);
+  }, 1000);
 
   // Keyboard on the focused slider (arrow keys / PageUp / End).
   window.addEventListener(
     "keydown",
     (e) => {
-      if (!state.locked || !closest(e, SLIDER)) return;
+      if (!state.locked || !sliderBar(e)) return;
       const up = { ArrowUp: STEP, ArrowRight: STEP, PageUp: STEP, End: 1 }[e.key];
       if (up === undefined) return;
       e.preventDefault();
@@ -278,6 +343,13 @@ function volumeLock() {
 .vl-primary:hover{transform:scale(1.04)}
 .vl-primary:active{transform:scale(1)}
 .vl-primary:disabled{opacity:.6;cursor:default;transform:none}
+.vl-panel{display:flex;flex-direction:column;gap:16px}
+.vl-panel .x-settings-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.vl-panel .x-settings-firstColumn{display:flex;flex-direction:column;gap:2px;min-width:0}
+.vl-secondary{flex:0 0 auto;min-height:32px;padding:4px 16px;border:1px solid var(--spice-subtext,#7c7c7c);
+  border-radius:9999px;background:transparent;color:var(--spice-text,#fff);cursor:pointer;transition:transform .1s}
+.vl-secondary:hover{border-color:var(--spice-text,#fff);transform:scale(1.04)}
+.vl-secondary:disabled{opacity:.6;cursor:default;transform:none}
 `;
   document.head.appendChild(style);
 
@@ -540,15 +612,31 @@ function volumeLock() {
     section.append(updatesRow);
     return section;
   }
+  // Spotify's Settings markup changes between versions (and headings are translated),
+  // so look for the container several ways.
+  function findSettingsContainer() {
+    const direct = document.querySelector(".x-settings-container, [data-testid='settings-page']");
+    if (direct) return direct;
+    const path = S.Platform?.History?.location?.pathname || location.pathname || "";
+    if (!/preferences|settings/i.test(path)) return null;
+    const section = document.querySelector(".x-settings-section");
+    if (section?.parentElement) return section.parentElement;
+    // Fallback: the nearest element that holds the first few section headings.
+    const heads = [...document.querySelectorAll("main h2, .main-view-container h2")].filter((h) => !h.closest(".vl-settings"));
+    if (heads.length < 3) return null;
+    let node = heads[0].parentElement;
+    while (node && !(node.contains(heads[1]) && node.contains(heads[2]))) node = node.parentElement;
+    return node;
+  }
   function mountSettings() {
-    const container = document.querySelector(".x-settings-container");
+    const container = findSettingsContainer();
     if (!container) {
       settingsSection = null;
       return;
     }
     if (settingsSection?.isConnected && settingsSection.parentElement === container) return;
     settingsSection = buildSettings(container);
-    const sections = [...container.querySelectorAll(":scope > .x-settings-section")];
+    const sections = [...container.children].filter((s) => s !== settingsSection && s.querySelector("h2"));
     const anchor = sections.find((s) => /^playback$/i.test(s.querySelector("h2")?.textContent.trim() ?? ""));
     if (anchor) anchor.after(settingsSection);
     else container.append(settingsSection);
@@ -559,10 +647,55 @@ function volumeLock() {
     mountSettings();
   }
 
+  // ---------- standalone panel (right-click the lock button, or profile menu) ----------
+  // Same options as the Settings section, for Spotify versions where that can't be found.
+  function openPanel() {
+    const cls = {
+      h2: "encore-text-body-medium-bold",
+      label: "encore-text-body-medium-bold",
+      marginal: "vl-note encore-text-body-small",
+      button: "vl-secondary encore-text-body-small-bold",
+    };
+    const section = buildSettings(document.createElement("div"));
+    // Rebuild rows with panel classes (buildSettings copies Spotify's classes when it can).
+    const rows = el("div", { className: "vl-panel" });
+    for (const row of section.querySelectorAll(".x-settings-row")) {
+      const label = row.querySelector("label");
+      const desc = row.querySelector("span");
+      const button = row.querySelector("button");
+      const r = settingsRow(cls, label.textContent, desc.textContent, button.textContent, button.onclick);
+      r.hidden = row.hidden;
+      if (label.classList.contains("vl-secret")) {
+        const l = r.querySelector("label");
+        l.classList.add("vl-secret");
+        l.addEventListener("click", (e) => {
+          if (e.detail !== 3) return;
+          if (!e.shiftKey) rows.querySelectorAll(".x-settings-row[hidden]").forEach((h) => (h.hidden = false));
+          else if (state.locked) unlock();
+          else lock();
+        });
+      }
+      rows.append(r);
+    }
+    const status = state.locked ? `Locked at ${pct(state.max)}.` : "Not locked.";
+    const form = el("div", { className: "vl-form" }, el("p", { className: "vl-note encore-text-body-small", textContent: status }), rows);
+    openModal("Volume lock", form, null);
+  }
+  try {
+    if (S.Menu?.Item) new S.Menu.Item("Volume lock", false, openPanel).register();
+  } catch (e) {
+    console.warn("[Volume Lock] couldn't add menu item", e);
+  }
+
   // ---------- playbar button ----------
   const btn = el("button", { type: "button", className: "vl-btn" });
   const tip = S.Tippy && S.TippyProps ? S.Tippy(btn, { ...S.TippyProps, content: "" }) : null;
 
+  btn.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openPanel();
+  });
   btn.addEventListener("click", () => {
     if (state.locked) openUnlock();
     else if (!state.hash) openSetPassword({ lockAfter: true });
