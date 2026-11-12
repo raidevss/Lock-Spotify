@@ -17,6 +17,16 @@ function Install-LockSpotify {
 
   function Step($text) { Write-Host "`n> $text" -ForegroundColor Cyan }
   function Ok($text) { Write-Host "  $text" -ForegroundColor Green }
+  # Closes Spotify the normal way first so it saves its data to disk (the Volume Lock
+  # password and locked/unlocked state live there). Force-closes only if it won't quit.
+  function Close-Spotify {
+    if (-not (Get-Process Spotify -ErrorAction SilentlyContinue)) { return }
+    & taskkill.exe /IM Spotify.exe 2>&1 | Out-Null
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Process Spotify -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    Get-Process Spotify -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 1
+  }
   # Runs spicetify, shows its output, returns only the exit code.
   function Run-Spicetify {
     & $spicetify @args | Out-Host
@@ -98,8 +108,7 @@ function Install-LockSpotify {
   # Set LOCK_SPOTIFY_NO_NORMALIZE=1 to skip.
   if ($env:LOCK_SPOTIFY_NO_NORMALIZE -ne '1') {
     Step 'Turning on "Normalize volume" (keeps every song at a similar loudness)'
-    Get-Process Spotify -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 2
+    Close-Spotify
     $prefFiles = @($spotifyPrefs) + @(Get-ChildItem (Join-Path $env:APPDATA 'Spotify\Users') -Filter prefs -Recurse -ErrorAction SilentlyContinue | ForEach-Object FullName)
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     foreach ($file in $prefFiles) {
@@ -112,7 +121,9 @@ function Install-LockSpotify {
   }
 
   # --- 6. Apply ---
+  # Your password and lock state are kept: this only replaces the extension file.
   Step 'Applying to Spotify (Spotify will restart)'
+  Close-Spotify
   $backupDir = Join-Path $userData 'Backup'
   $hasBackup = (Test-Path $backupDir) -and (Get-ChildItem $backupDir -ErrorAction SilentlyContinue | Select-Object -First 1)
   if ($hasBackup) { $code = Run-Spicetify apply } else { $code = Run-Spicetify backup apply }
@@ -130,7 +141,9 @@ function Install-LockSpotify {
   elseif ((Run-Spicetify spotify-updates block) -eq 0) { Ok 'Blocked' }
   else { Write-Host '  Could not block updates. If the lock disappears after a Spotify update, run this installer again.' -ForegroundColor Yellow }
 
-  Write-Host "`nDone. Volume Lock v$extVersion is installed." -ForegroundColor Green
+  $spotifyVersion = (Get-Item $spotifyExe).VersionInfo.ProductVersion
+  Write-Host "`nDone. Volume Lock v$extVersion is installed (Spotify $spotifyVersion)." -ForegroundColor Green
+  Write-Host 'Your password and locked/unlocked state were kept.'
   Write-Host 'In Spotify: click the lock next to the volume to lock it. Password settings are in Settings > Volume lock.'
 }
 
