@@ -1,9 +1,9 @@
 // NAME: Volume Lock
 // DESCRIPTION: Caps Spotify's maximum volume behind a password. Lock button sits next to the volume control; password lives in Settings.
-// VERSION: 1.3.2
+// VERSION: 1.3.3
 
 (function () {
-  const VERSION = "1.3.2";
+  const VERSION = "1.3.3";
   const REPO = "raidevss/Lock-Spotify";
   const UPDATE_KEY = "volume-lock:update"; // { version, code } downloaded by "Check for updates"
 
@@ -211,18 +211,20 @@ function volumeLock() {
 
   // If the knob is drawn above the cap but the volume didn't change, Spotify never
   // re-renders it. Nudge the volume so the slider snaps back to the real level.
-  function snapSlider(bar, onlyIfKnown = false) {
-    if (!state.locked) return;
+  // Only runs right after the user drags or scrolls the slider, and only when the
+  // slider clearly reports a position above the cap.
+  function snapSlider(bar) {
+    if (!state.locked || document.hidden) return;
     const input = bar?.querySelector('input[type="range"]');
-    if (!input && onlyIfKnown) return;
-    if (input) {
-      const max = Number(input.max) || 1;
-      if (Number(input.value) / max <= state.max + EPS) return;
-    }
+    if (!input) return;
+    const value = Number(input.value);
+    const max = Number(input.max) || (value > 1 ? 100 : 1);
+    if (!(value / max > state.max + 0.02)) return;
     const target = Math.min(getVol(), state.max);
     apiSet(Math.max(0, target - 0.01));
     setTimeout(() => apiSet(target), 60);
   }
+
 
   function clampPointer(e, r) {
     if (!r.width || !r.height) return;
@@ -287,10 +289,6 @@ function volumeLock() {
     const bar = state.locked && closest(e, BAR);
     if (bar) setTimeout(() => snapSlider(bar), 80);
   }, true);
-  // Backstop for anything else that leaves the knob above the cap.
-  setInterval(() => {
-    if (state.locked && !dragRect) snapSlider(findBar(), true);
-  }, 1000);
 
   // Keyboard on the focused slider (arrow keys / PageUp / End).
   window.addEventListener(
@@ -630,18 +628,22 @@ function volumeLock() {
   // "x-settings" names), so find the page by its text instead: the "Playback"
   // heading next to other known section headings, on a page with "Normalize volume".
   const OTHER_SECTIONS = /^(language|library|your library|display|social|startup and window behaviou?r|storage|compatibility|proxy settings|local files|audio quality|account|notifications|privacy)$/i;
+  // Finds the innermost element whose whole text matches (works even when Spotify
+  // splits a label across several elements).
   function textEl(root, re) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode: (t) => (re.test(t.nodeValue.trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
-    });
-    const hit = walker.nextNode();
-    return hit?.parentElement && !hit.parentElement.closest(".vl-settings, .vl-root") ? hit.parentElement : null;
+    let best = null;
+    for (const n of root.querySelectorAll("h1,h2,h3,h4,h5,label,span,p,div,button")) {
+      if (n.childElementCount > 3 || n.closest(".vl-settings, .vl-root")) continue;
+      if (n.textContent.length > 60 || !re.test(n.textContent.trim())) continue;
+      if (!best || best.contains(n)) best = n;
+    }
+    return best;
   }
   function hasOtherSection(node) {
-    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
-      acceptNode: (t) => (OTHER_SECTIONS.test(t.nodeValue.trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
-    });
-    return !!walker.nextNode();
+    for (const n of node.querySelectorAll("h1,h2,h3,h4,h5,span,div,p")) {
+      if (n.childElementCount <= 3 && n.textContent.length <= 40 && OTHER_SECTIONS.test(n.textContent.trim())) return true;
+    }
+    return false;
   }
   function findSettings() {
     // Old Spotify (<= 1.2.x)
@@ -651,12 +653,13 @@ function volumeLock() {
       const anchor = sections.find((s) => /^playback$/i.test(s.querySelector("h2")?.textContent.trim() ?? ""));
       return { container: old, anchor };
     }
-    // New Spotify: cheap check first (the Settings page is full of toggle switches).
-    if (document.querySelectorAll('[role="switch"], input[type="checkbox"]').length < 3) return null;
-    const root = document.querySelector("main") || document.body;
-    if (!textEl(root, /^normalize volume$/i)) return null;
-    const heading = textEl(root, /^playback$/i);
-    if (!heading) return null;
+    // New Spotify: only search while the Settings page (or a settings dialog) is open.
+    const path = S.Platform?.History?.location?.pathname || "";
+    if (!/preferences|settings/i.test(path) && !document.querySelector('[role="dialog"]')) return null;
+    const root = document.body;
+    const normalize = textEl(root, /^normali[sz]e volume$/i);
+    if (!normalize) return null;
+    const heading = textEl(root, /^playback$/i) || normalize;
     // Climb from the "Playback" heading to its section: the last ancestor that doesn't
     // also contain another section's heading. Its parent holds all the sections.
     let section = heading;
