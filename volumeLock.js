@@ -1,9 +1,9 @@
 // NAME: Volume Lock
 // DESCRIPTION: Caps Spotify's maximum volume behind a password. Lock button sits next to the volume control; password lives in Settings.
-// VERSION: 1.3.1
+// VERSION: 1.3.2
 
 (function () {
-  const VERSION = "1.3.1";
+  const VERSION = "1.3.2";
   const REPO = "raidevss/Lock-Spotify";
   const UPDATE_KEY = "volume-lock:update"; // { version, code } downloaded by "Check for updates"
 
@@ -356,6 +356,14 @@ function volumeLock() {
 .vl-primary:hover{transform:scale(1.04)}
 .vl-primary:active{transform:scale(1)}
 .vl-primary:disabled{opacity:.6;cursor:default;transform:none}
+.vl-settings{margin:24px 0}
+.vl-settings .x-settings-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:16px}
+.vl-settings .x-settings-firstColumn{display:flex;flex-direction:column;gap:2px;min-width:0}
+.vl-settings .x-settings-firstColumn > span{color:var(--text-subdued,#b3b3b3)}
+.vl-secondary{flex:0 0 auto;min-height:32px;padding:4px 16px;border:1px solid var(--essential-subdued,#7c7c7c);
+  border-radius:9999px;background:transparent;color:var(--text-base,#fff);cursor:pointer;transition:transform .1s}
+.vl-secondary:hover{border-color:var(--text-base,#fff);transform:scale(1.04)}
+.vl-secondary:disabled{opacity:.6;cursor:default;transform:none}
 `;
   document.head.appendChild(style);
 
@@ -566,8 +574,8 @@ function volumeLock() {
   // ---------- Settings page section ----------
   // Class names are copied from Spotify's own Settings rows at runtime (they're hashed per version).
   let settingsSection = null;
-  function settingsClasses(container) {
-    const h2 = container.querySelector(".x-settings-section h2");
+  function settingsClasses(container, heading) {
+    const h2 = container.querySelector(".x-settings-section h2") || heading;
     const label = container.querySelector(".x-settings-firstColumn label");
     const marginal = container.querySelector(".x-settings-firstColumn span.encore-text-marginal");
     const button = [...container.querySelectorAll(".x-settings-secondColumn button")].find((b) => /secondary/.test(b.className));
@@ -575,7 +583,7 @@ function volumeLock() {
       h2: h2?.className || "encore-text-body-medium-bold",
       label: label?.className || "encore-text-body-small",
       marginal: marginal?.className || "encore-text-marginal",
-      button: (button?.className || "vl-primary encore-text-body-small-bold").replace(/\s?e-\d+-button--trailing/, ""),
+      button: (button?.className || "vl-secondary encore-text-body-small-bold").replace(/\s?e-\d+-button--trailing/, ""),
     };
   }
   function settingsRow(cls, labelText, desc, btnText, onClick) {
@@ -591,8 +599,8 @@ function volumeLock() {
       el("div", { className: "x-settings-secondColumn" }, el("button", { type: "button", className: cls.button, textContent: btnText, onclick: onClick })),
     );
   }
-  function buildSettings(container) {
-    const cls = settingsClasses(container);
+  function buildSettings(container, heading) {
+    const cls = settingsClasses(container, heading);
     const section = el("div", { className: "x-settings-section vl-settings" }, el("h2", { className: cls.h2, textContent: "Volume lock" }));
     if (state.hash) {
       const changeRow = settingsRow(cls, "Change password", "The password used to unlock the volume.", "Change", () => openSetPassword());
@@ -618,39 +626,73 @@ function volumeLock() {
     section.append(updatesRow);
     return section;
   }
-  // Spotify's Settings markup changes between versions,
-  // so look for the container several ways.
-  function findSettingsContainer() {
-    const direct = document.querySelector(".x-settings-container, [data-testid='settings-page']");
-    if (direct) return direct;
-    const path = S.Platform?.History?.location?.pathname || location.pathname || "";
-    if (!/preferences|settings/i.test(path)) return null;
-    const section = document.querySelector(".x-settings-section");
-    if (section?.parentElement) return section.parentElement;
-    // Fallback: the nearest element that holds the first few section headings.
-    const heads = [...document.querySelectorAll("main h2, .main-view-container h2")].filter((h) => !h.closest(".vl-settings"));
-    if (heads.length < 3) return null;
-    let node = heads[0].parentElement;
-    while (node && !(node.contains(heads[1]) && node.contains(heads[2]))) node = node.parentElement;
-    return node;
+  // Spotify's Settings markup changes between versions (1.3.x dropped the old
+  // "x-settings" names), so find the page by its text instead: the "Playback"
+  // heading next to other known section headings, on a page with "Normalize volume".
+  const OTHER_SECTIONS = /^(language|library|your library|display|social|startup and window behaviou?r|storage|compatibility|proxy settings|local files|audio quality|account|notifications|privacy)$/i;
+  function textEl(root, re) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (t) => (re.test(t.nodeValue.trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
+    });
+    const hit = walker.nextNode();
+    return hit?.parentElement && !hit.parentElement.closest(".vl-settings, .vl-root") ? hit.parentElement : null;
   }
-  function mountSettings() {
-    const container = findSettingsContainer();
-    if (!container) {
+  function hasOtherSection(node) {
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+      acceptNode: (t) => (OTHER_SECTIONS.test(t.nodeValue.trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
+    });
+    return !!walker.nextNode();
+  }
+  function findSettings() {
+    // Old Spotify (<= 1.2.x)
+    const old = document.querySelector(".x-settings-container");
+    if (old) {
+      const sections = [...old.children].filter((s) => s !== settingsSection && s.querySelector("h2"));
+      const anchor = sections.find((s) => /^playback$/i.test(s.querySelector("h2")?.textContent.trim() ?? ""));
+      return { container: old, anchor };
+    }
+    // New Spotify: cheap check first (the Settings page is full of toggle switches).
+    if (document.querySelectorAll('[role="switch"], input[type="checkbox"]').length < 3) return null;
+    const root = document.querySelector("main") || document.body;
+    if (!textEl(root, /^normalize volume$/i)) return null;
+    const heading = textEl(root, /^playback$/i);
+    if (!heading) return null;
+    // Climb from the "Playback" heading to its section: the last ancestor that doesn't
+    // also contain another section's heading. Its parent holds all the sections.
+    let section = heading;
+    while (section.parentElement && section.parentElement !== root && !hasOtherSection(section.parentElement)) {
+      section = section.parentElement;
+    }
+    if (!section.parentElement) return null;
+    return { container: section.parentElement, anchor: section, heading };
+  }
+
+  let lastSettingsCheck = 0;
+  let settingsTimer = null;
+  function mountSettings(force) {
+    if (settingsSection?.isConnected) return;
+    const now = Date.now();
+    if (!force && now - lastSettingsCheck < 400) {
+      settingsTimer ??= setTimeout(() => {
+        settingsTimer = null;
+        mountSettings();
+      }, 450);
+      return;
+    }
+    lastSettingsCheck = now;
+    const found = findSettings();
+    if (!found) {
       settingsSection = null;
       return;
     }
-    if (settingsSection?.isConnected && settingsSection.parentElement === container) return;
-    settingsSection = buildSettings(container);
-    const sections = [...container.children].filter((s) => s !== settingsSection && s.querySelector("h2"));
-    const anchor = sections.find((s) => /^playback$/i.test(s.querySelector("h2")?.textContent.trim() ?? ""));
-    if (anchor) anchor.after(settingsSection);
-    else container.append(settingsSection);
+    settingsSection = buildSettings(found.container, found.heading);
+    if (found.anchor) found.anchor.after(settingsSection);
+    else found.container.append(settingsSection);
   }
   function refreshSettings() {
     settingsSection?.remove();
     settingsSection = null;
-    mountSettings();
+    mountSettings(true);
   }
 
   // ---------- playbar button ----------
