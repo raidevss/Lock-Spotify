@@ -1,9 +1,9 @@
 // NAME: Volume Lock
 // DESCRIPTION: Caps Spotify's maximum volume behind a password. Lock button sits next to the volume control; password lives in Settings.
-// VERSION: 1.3.0
+// VERSION: 1.3.1
 
 (function () {
-  const VERSION = "1.3.0";
+  const VERSION = "1.3.1";
   const REPO = "raidevss/Lock-Spotify";
   const UPDATE_KEY = "volume-lock:update"; // { version, code } downloaded by "Check for updates"
 
@@ -168,7 +168,20 @@ function volumeLock() {
   let dragBar = null;
 
   const closest = (e, sel) => (e.target instanceof Element ? e.target.closest(sel) : null);
-  const findBar = () => document.querySelector(BAR);
+  // Prefer Spotify's own test id (stable), and only take a visible bar. A plain
+  // ".volume-bar" match can be an outer wrapper, which hid the lock button.
+  const visible = (n) => {
+    const r = n.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+  function findBar() {
+    for (const sel of ['[data-testid="volume-bar"]', ".volume-bar"]) {
+      const all = [...document.querySelectorAll(sel)].filter((n) => !n.closest(".vl-root"));
+      const hit = all.find(visible) || all[0];
+      if (hit) return hit;
+    }
+    return null;
+  }
 
   function findTrack(bar) {
     for (const sel of TRACK_SELECTORS) {
@@ -191,7 +204,7 @@ function volumeLock() {
   }
   // The slider part of the volume bar (not the mute button, not our lock button).
   function sliderBar(e) {
-    const bar = closest(e, BAR);
+    const bar = closest(e, '[data-testid="volume-bar"]') || closest(e, ".volume-bar");
     if (!bar || closest(e, "button") || closest(e, ".vl-btn")) return null;
     return bar;
   }
@@ -660,7 +673,7 @@ function volumeLock() {
   }
 
   function mountButton() {
-    const vb = document.querySelector(BAR) || document.querySelector(".volume-bar");
+    const vb = findBar();
     if (vb?.parentElement && btn.nextElementSibling !== vb) vb.parentElement.insertBefore(btn, vb);
   }
 

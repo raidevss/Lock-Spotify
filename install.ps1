@@ -120,7 +120,14 @@ function Install-LockSpotify {
     Ok 'Normalize volume is on'
   }
 
-  # --- 6. Apply ---
+  # --- 6. Stop Spotify from updating itself (an update would remove the lock) ---
+  Step 'Blocking Spotify auto-updates'
+  Close-Spotify # Spotify.exe can't be changed while it's running
+  if ($env:LOCK_SPOTIFY_ALLOW_UPDATES -eq '1') { Ok 'Skipped (LOCK_SPOTIFY_ALLOW_UPDATES=1)' }
+  elseif ((Run-Spicetify spotify-updates block) -eq 0) { Ok 'Blocked' }
+  else { Write-Host '  Could not block updates. If the lock disappears after a Spotify update, run this installer again.' -ForegroundColor Yellow }
+
+  # --- 7. Apply ---
   # Your password and lock state are kept: this only replaces the extension file.
   Step 'Applying to Spotify (Spotify will restart)'
   Close-Spotify
@@ -134,12 +141,6 @@ function Install-LockSpotify {
     if ($code -ne 0) { throw "Spicetify apply failed (exit code $code)." }
   }
   Ok 'Applied'
-
-  # --- 7. Stop Spotify from updating itself (an update would remove the lock) ---
-  Step 'Blocking Spotify auto-updates'
-  if ($env:LOCK_SPOTIFY_ALLOW_UPDATES -eq '1') { Ok 'Skipped (LOCK_SPOTIFY_ALLOW_UPDATES=1)' }
-  elseif ((Run-Spicetify spotify-updates block) -eq 0) { Ok 'Blocked' }
-  else { Write-Host '  Could not block updates. If the lock disappears after a Spotify update, run this installer again.' -ForegroundColor Yellow }
 
   $spotifyVersion = (Get-Item $spotifyExe).VersionInfo.ProductVersion
   Write-Host "`nDone. Volume Lock v$extVersion is installed (Spotify $spotifyVersion)." -ForegroundColor Green
