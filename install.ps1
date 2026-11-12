@@ -131,8 +131,7 @@ function Install-LockSpotify {
   else { Write-Host '  Could not block updates. If the lock disappears after a Spotify update, run this installer again.' -ForegroundColor Yellow }
 
   Write-Host "`nDone. Volume Lock v$extVersion is installed." -ForegroundColor Green
-  Write-Host 'In Spotify: click the lock next to the volume to lock it. Password settings are in Settings > Volume lock,'
-  Write-Host 'or right-click the lock button.'
+  Write-Host 'In Spotify: click the lock next to the volume to lock it. Password settings are in Settings > Volume lock.'
 }
 
 try {

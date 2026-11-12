@@ -343,13 +343,6 @@ function volumeLock() {
 .vl-primary:hover{transform:scale(1.04)}
 .vl-primary:active{transform:scale(1)}
 .vl-primary:disabled{opacity:.6;cursor:default;transform:none}
-.vl-panel{display:flex;flex-direction:column;gap:16px}
-.vl-panel .x-settings-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
-.vl-panel .x-settings-firstColumn{display:flex;flex-direction:column;gap:2px;min-width:0}
-.vl-secondary{flex:0 0 auto;min-height:32px;padding:4px 16px;border:1px solid var(--spice-subtext,#7c7c7c);
-  border-radius:9999px;background:transparent;color:var(--spice-text,#fff);cursor:pointer;transition:transform .1s}
-.vl-secondary:hover{border-color:var(--spice-text,#fff);transform:scale(1.04)}
-.vl-secondary:disabled{opacity:.6;cursor:default;transform:none}
 `;
   document.head.appendChild(style);
 
@@ -612,7 +605,7 @@ function volumeLock() {
     section.append(updatesRow);
     return section;
   }
-  // Spotify's Settings markup changes between versions (and headings are translated),
+  // Spotify's Settings markup changes between versions,
   // so look for the container several ways.
   function findSettingsContainer() {
     const direct = document.querySelector(".x-settings-container, [data-testid='settings-page']");
@@ -647,55 +640,10 @@ function volumeLock() {
     mountSettings();
   }
 
-  // ---------- standalone panel (right-click the lock button, or profile menu) ----------
-  // Same options as the Settings section, for Spotify versions where that can't be found.
-  function openPanel() {
-    const cls = {
-      h2: "encore-text-body-medium-bold",
-      label: "encore-text-body-medium-bold",
-      marginal: "vl-note encore-text-body-small",
-      button: "vl-secondary encore-text-body-small-bold",
-    };
-    const section = buildSettings(document.createElement("div"));
-    // Rebuild rows with panel classes (buildSettings copies Spotify's classes when it can).
-    const rows = el("div", { className: "vl-panel" });
-    for (const row of section.querySelectorAll(".x-settings-row")) {
-      const label = row.querySelector("label");
-      const desc = row.querySelector("span");
-      const button = row.querySelector("button");
-      const r = settingsRow(cls, label.textContent, desc.textContent, button.textContent, button.onclick);
-      r.hidden = row.hidden;
-      if (label.classList.contains("vl-secret")) {
-        const l = r.querySelector("label");
-        l.classList.add("vl-secret");
-        l.addEventListener("click", (e) => {
-          if (e.detail !== 3) return;
-          if (!e.shiftKey) rows.querySelectorAll(".x-settings-row[hidden]").forEach((h) => (h.hidden = false));
-          else if (state.locked) unlock();
-          else lock();
-        });
-      }
-      rows.append(r);
-    }
-    const status = state.locked ? `Locked at ${pct(state.max)}.` : "Not locked.";
-    const form = el("div", { className: "vl-form" }, el("p", { className: "vl-note encore-text-body-small", textContent: status }), rows);
-    openModal("Volume lock", form, null);
-  }
-  try {
-    if (S.Menu?.Item) new S.Menu.Item("Volume lock", false, openPanel).register();
-  } catch (e) {
-    console.warn("[Volume Lock] couldn't add menu item", e);
-  }
-
   // ---------- playbar button ----------
   const btn = el("button", { type: "button", className: "vl-btn" });
   const tip = S.Tippy && S.TippyProps ? S.Tippy(btn, { ...S.TippyProps, content: "" }) : null;
 
-  btn.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    openPanel();
-  });
   btn.addEventListener("click", () => {
     if (state.locked) openUnlock();
     else if (!state.hash) openSetPassword({ lockAfter: true });
