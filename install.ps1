@@ -27,6 +27,16 @@ function Install-LockSpotify {
     Get-Process Spotify -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 1
   }
+  # Downloads and runs Spotify's official installer (also repairs an existing install).
+  function Install-SpotifyApp {
+    $updateDir = Join-Path $env:LOCALAPPDATA 'Spotify\Update'
+    if (Test-Path $updateDir) { & icacls.exe $updateDir /remove:d '*S-1-1-0' | Out-Null }
+    $setup = Join-Path $env:TEMP 'SpotifySetup.exe'
+    Invoke-WebRequest -UseBasicParsing 'https://download.scdn.co/SpotifySetup.exe' -OutFile $setup
+    Start-Process $setup -ArgumentList '/silent' -Wait
+    Remove-Item $setup -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $spotifyExe)) { throw 'Spotify did not install. Install it from spotify.com/download and run this again.' }
+  }
   # Runs spicetify, shows its output, returns only the exit code.
   function Run-Spicetify {
     & $spicetify @args | Out-Host
@@ -51,11 +61,7 @@ function Install-LockSpotify {
   # --- 2. Desktop Spotify ---
   if (-not (Test-Path $spotifyExe)) {
     Step 'Installing Spotify'
-    $setup = Join-Path $env:TEMP 'SpotifySetup.exe'
-    Invoke-WebRequest -UseBasicParsing 'https://download.scdn.co/SpotifySetup.exe' -OutFile $setup
-    Start-Process $setup -ArgumentList '/silent' -Wait
-    Remove-Item $setup -Force -ErrorAction SilentlyContinue
-    if (-not (Test-Path $spotifyExe)) { throw 'Spotify did not install. Install it from spotify.com/download and run this again.' }
+    Install-SpotifyApp
     Ok 'Spotify installed'
   }
   # Spicetify needs the prefs file, which Spotify creates on its first launch.
@@ -120,14 +126,7 @@ function Install-LockSpotify {
     Ok 'Normalize volume is on'
   }
 
-  # --- 6. Stop Spotify from updating itself (an update would remove the lock) ---
-  Step 'Blocking Spotify auto-updates'
-  Close-Spotify # Spotify.exe can't be changed while it's running
-  if ($env:LOCK_SPOTIFY_ALLOW_UPDATES -eq '1') { Ok 'Skipped (LOCK_SPOTIFY_ALLOW_UPDATES=1)' }
-  elseif ((Run-Spicetify spotify-updates block) -eq 0) { Ok 'Blocked' }
-  else { Write-Host '  Could not block updates. If the lock disappears after a Spotify update, run this installer again.' -ForegroundColor Yellow }
-
-  # --- 7. Apply ---
+  # --- 6. Apply ---
   # Your password and lock state are kept: this only replaces the extension file.
   Step 'Applying to Spotify (Spotify will restart)'
   Close-Spotify
@@ -135,12 +134,45 @@ function Install-LockSpotify {
   $hasBackup = (Test-Path $backupDir) -and (Get-ChildItem $backupDir -ErrorAction SilentlyContinue | Select-Object -First 1)
   if ($hasBackup) { $code = Run-Spicetify apply } else { $code = Run-Spicetify backup apply }
   if ($code -ne 0) {
-    # Usually means Spotify updated since the last backup: rebuild it.
-    Write-Host '  Rebuilding Spicetify backup for this Spotify version...' -ForegroundColor Yellow
-    $code = Run-Spicetify restore backup apply
+    # Spotify updated itself since the last backup. The old backup is for the old
+    # version, so throw it away and back up this version instead.
+    Write-Host '  Spotify was updated. Rebuilding Spicetify for this Spotify version...' -ForegroundColor Yellow
+    Close-Spotify
+    'y' | & $spicetify clear | Out-Host
+    $code = Run-Spicetify backup apply
+  }
+  if ($code -ne 0) {
+    # Spotify's files are half-modded. A fresh copy of Spotify fixes that.
+    # (This is the app only: your Spotify login, settings and Volume Lock password stay.)
+    Write-Host '  Reinstalling Spotify to get clean files...' -ForegroundColor Yellow
+    Install-SpotifyApp
+    Close-Spotify
+    'y' | & $spicetify clear | Out-Host
+    $code = Run-Spicetify backup apply
     if ($code -ne 0) { throw "Spicetify apply failed (exit code $code)." }
   }
   Ok 'Applied'
+
+  # --- 7. Stop Spotify from updating itself (an update removes the lock) ---
+  # Newer Spotify versions ignore Spicetify's update block, so also lock the folder
+  # Spotify downloads its updates into.
+  $updateDir = Join-Path $env:LOCALAPPDATA 'Spotify\Update'
+  if ($env:LOCK_SPOTIFY_ALLOW_UPDATES -eq '1') {
+    Step 'Allowing Spotify auto-updates (LOCK_SPOTIFY_ALLOW_UPDATES=1)'
+    if (Test-Path $updateDir) { & icacls.exe $updateDir /remove:d '*S-1-1-0' | Out-Null }
+    Ok 'Allowed'
+  }
+  else {
+    Step 'Blocking Spotify auto-updates'
+    if (Test-Path $updateDir) {
+      & icacls.exe $updateDir /remove:d '*S-1-1-0' | Out-Null
+      Remove-Item $updateDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Force $updateDir | Out-Null
+    & icacls.exe $updateDir /deny '*S-1-1-0:(OI)(CI)(W,D,DC)' | Out-Null
+    if ($LASTEXITCODE -eq 0) { Ok 'Blocked' }
+    else { Write-Host '  Could not block updates. If the lock disappears after a Spotify update, run this installer again.' -ForegroundColor Yellow }
+  }
 
   $spotifyVersion = (Get-Item $spotifyExe).VersionInfo.ProductVersion
   Write-Host "`nDone. Volume Lock v$extVersion is installed (Spotify $spotifyVersion)." -ForegroundColor Green
